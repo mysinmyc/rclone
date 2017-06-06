@@ -1128,12 +1128,13 @@ func Delete(f Fs) error {
 }
 
 // dedupeRename renames the objs slice to different names
-func dedupeRename(remote string, objs []Object) {
+func dedupeRename(checksum string, objs []Object) {
 	f := objs[0].Fs()
 	doMove := f.Features().Move
 	if doMove == nil {
 		log.Fatalf("Fs %v doesn't support Move", f)
 	}
+	remote :=objs[0].Remote()
 	ext := path.Ext(remote)
 	base := remote[:len(remote)-len(ext)]
 	for i, o := range objs {
@@ -1153,59 +1154,31 @@ func dedupeRename(remote string, objs []Object) {
 }
 
 // dedupeDeleteAllButOne deletes all but the one in keep
-func dedupeDeleteAllButOne(keep int, remote string, objs []Object) {
+func dedupeDeleteAllButOne(keep int, checksum string, objs []Object) {
 	for i, o := range objs {
 		if i == keep {
+			Infof(checksum, "Keeping file %v", o)
 			continue
 		}
+		Infof(checksum, "deleting dumplicate %v", o)
 		_ = DeleteFile(o)
 	}
-	Logf(remote, "Deleted %d extra copies", len(objs)-1)
-}
-
-// dedupeDeleteIdentical deletes all but one of identical (by hash) copies
-func dedupeDeleteIdentical(remote string, objs []Object) []Object {
-	// See how many of these duplicates are identical
-	byHash := make(map[string][]Object, len(objs))
-	for _, o := range objs {
-		md5sum, err := o.Hash(HashMD5)
-		if err == nil {
-			byHash[md5sum] = append(byHash[md5sum], o)
-		}
-	}
-
-	// Delete identical duplicates, refilling obj with the ones remaining
-	objs = nil
-	for md5sum, hashObjs := range byHash {
-		if len(hashObjs) > 1 {
-			Logf(remote, "Deleting %d/%d identical duplicates (md5sum %q)", len(hashObjs)-1, len(hashObjs), md5sum)
-			for _, o := range hashObjs[1:] {
-				_ = DeleteFile(o)
-			}
-		}
-		objs = append(objs, hashObjs[0])
-	}
-
-	return objs
+	Logf(checksum, "Deleted %d extra copies", len(objs)-1)
 }
 
 // dedupeInteractive interactively dedupes the slice of objects
-func dedupeInteractive(remote string, objs []Object) {
-	fmt.Printf("%s: %d duplicates remain\n", remote, len(objs))
+func dedupeInteractive(checksum string, objs []Object) {
+	fmt.Printf("checksum %s: %d duplicates remain\n", checksum, len(objs))
 	for i, o := range objs {
-		md5sum, err := o.Hash(HashMD5)
-		if err != nil {
-			md5sum = err.Error()
-		}
-		fmt.Printf("  %d: %12d bytes, %s, md5sum %32s\n", i+1, o.Size(), o.ModTime().Format("2006-01-02 15:04:05.000000000"), md5sum)
+		fmt.Printf("  %d: %12d bytes, %s, path %s\n", i+1, o.Size(), o.ModTime().Format("2006-01-02 15:04:05.000000000"), o.Remote())
 	}
 	switch Command([]string{"sSkip and do nothing", "kKeep just one (choose which in next step)", "rRename all to be different (by changing file.jpg to file-1.jpg)"}) {
 	case 's':
 	case 'k':
 		keep := ChooseNumber("Enter the number of the file to keep", 1, len(objs))
-		dedupeDeleteAllButOne(keep-1, remote, objs)
+		dedupeDeleteAllButOne(keep-1, checksum, objs)
 	case 'r':
-		dedupeRename(remote, objs)
+		dedupeRename(checksum, objs)
 	}
 }
 
@@ -1282,6 +1255,14 @@ var _ pflag.Value = (*DeduplicateMode)(nil)
 // Google Drive which can have duplicate file names.
 func Deduplicate(f Fs, mode DeduplicateMode) error {
 	Infof(f, "Looking for duplicates using %v mode.", mode)
+
+	var hashType HashType
+	hashType = f.Hashes().GetOne()
+	if hashType==HashNone {
+		return errors.Errorf("%s: does not support any hash type",f.Name())
+	}
+	Infof(f, "HashType is %s" ,hashType)
+
 	files := map[string][]Object{}
 	list := NewLister().Start(f, "")
 	for {
@@ -1293,30 +1274,34 @@ func Deduplicate(f Fs, mode DeduplicateMode) error {
 		if o == nil {
 			break
 		}
-		remote := o.Remote()
-		files[remote] = append(files[remote], o)
+		hash,hashError:=o.Hash(hashType)
+		if hashError != nil {
+			Errorf(o, "Failed get checksum: %v", hashError)
+			return err
+		}
+		if hash=="" {
+			log.Fatalf(" %s returned an empty hash", o)
+		}
+		Stats.Checking(o.Remote())
+		files[hash] = append(files[hash], o)
+		Stats.DoneChecking(o.Remote())
 	}
-	for remote, objs := range files {
+	for hash, objs := range files {
 		if len(objs) > 1 {
-			Logf(remote, "Found %d duplicates - deleting identical copies", len(objs))
-			objs = dedupeDeleteIdentical(remote, objs)
-			if len(objs) <= 1 {
-				Logf(remote, "All duplicates removed")
-				continue
-			}
+			Logf(hash, "Found %d duplicates - deleting identical copies", len(objs))
 			switch mode {
 			case DeduplicateInteractive:
-				dedupeInteractive(remote, objs)
+				dedupeInteractive(hash, objs)
 			case DeduplicateFirst:
-				dedupeDeleteAllButOne(0, remote, objs)
+				dedupeDeleteAllButOne(0, hash, objs)
 			case DeduplicateNewest:
 				sort.Sort(objectsSortedByModTime(objs)) // sort oldest first
-				dedupeDeleteAllButOne(len(objs)-1, remote, objs)
+				dedupeDeleteAllButOne(len(objs)-1, hash, objs)
 			case DeduplicateOldest:
 				sort.Sort(objectsSortedByModTime(objs)) // sort oldest first
-				dedupeDeleteAllButOne(0, remote, objs)
+				dedupeDeleteAllButOne(0, hash, objs)
 			case DeduplicateRename:
-				dedupeRename(remote, objs)
+				dedupeRename(hash, objs)
 			case DeduplicateSkip:
 				// skip
 			default:
