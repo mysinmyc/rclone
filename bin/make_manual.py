@@ -30,6 +30,8 @@ docs = [
     "b2.md",
     "yandex.md",
     "sftp.md",
+    "ftp.md",
+    "http.md",
     "crypt.md",
     "local.md",
     "changelog.md",

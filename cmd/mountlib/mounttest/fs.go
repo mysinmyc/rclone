@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ncw/rclone/cmd/mountlib"
 	"github.com/ncw/rclone/fs"
@@ -45,12 +46,10 @@ var (
 )
 
 // TestMain drives the tests
-func TestMain(m *testing.M, fn MountFn, dirPerms, filePerms os.FileMode) {
+func TestMain(m *testing.M, fn MountFn) {
 	mountFn = fn
 	flag.Parse()
 	run = newRun()
-	run.dirPerms = dirPerms
-	run.filePerms = filePerms
 	rc := m.Run()
 	run.Finalise()
 	os.Exit(rc)
@@ -58,15 +57,14 @@ func TestMain(m *testing.M, fn MountFn, dirPerms, filePerms os.FileMode) {
 
 // Run holds the remotes for a test run
 type Run struct {
-	filesys             *mountlib.FS
-	mountPath           string
-	fremote             fs.Fs
-	fremoteName         string
-	cleanRemote         func()
-	umountResult        <-chan error
-	umountFn            UnmountFn
-	skip                bool
-	dirPerms, filePerms os.FileMode
+	filesys      *mountlib.FS
+	mountPath    string
+	fremote      fs.Fs
+	fremoteName  string
+	cleanRemote  func()
+	umountResult <-chan error
+	umountFn     UnmountFn
+	skip         bool
 }
 
 // run holds the master Run data
@@ -157,6 +155,11 @@ func (r *Run) umount() {
 	log.Printf("Unmounting %q", r.mountPath)
 	err := r.umountFn()
 	if err != nil {
+		log.Printf("signal to umount failed - retrying: %v", err)
+		time.Sleep(3 * time.Second)
+		err = r.umountFn()
+	}
+	if err != nil {
 		log.Fatalf("signal to umount failed: %v", err)
 	}
 	log.Printf("Waiting for umount")
@@ -224,17 +227,17 @@ func (r *Run) readLocal(t *testing.T, dir dirMap, filepath string) {
 		if fi.IsDir() {
 			dir[name+"/"] = struct{}{}
 			r.readLocal(t, dir, name)
-			assert.Equal(t, r.dirPerms, fi.Mode().Perm())
+			assert.Equal(t, mountlib.DirPerms, fi.Mode().Perm())
 		} else {
 			dir[fmt.Sprintf("%s %d", name, fi.Size())] = struct{}{}
-			assert.Equal(t, r.filePerms, fi.Mode().Perm())
+			assert.Equal(t, mountlib.FilePerms, fi.Mode().Perm())
 		}
 	}
 }
 
 // reads the remote tree into dir
 func (r *Run) readRemote(t *testing.T, dir dirMap, filepath string) {
-	objs, dirs, err := fs.NewLister().SetLevel(1).Start(r.fremote, filepath).GetAll()
+	objs, dirs, err := fs.WalkGetAll(r.fremote, filepath, true, 1)
 	if err == fs.ErrorDirNotFound {
 		return
 	}
@@ -309,5 +312,5 @@ func TestRoot(t *testing.T) {
 	fi, err := os.Lstat(run.mountPath)
 	require.NoError(t, err)
 	assert.True(t, fi.IsDir())
-	assert.Equal(t, fi.Mode().Perm(), run.dirPerms)
+	assert.Equal(t, fi.Mode().Perm(), mountlib.DirPerms)
 }

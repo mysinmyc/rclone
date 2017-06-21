@@ -34,8 +34,8 @@
 [[projects]]
   name = "github.com/billziss-gh/cgofuse"
   packages = ["fuse"]
-  revision = "b402ef9fb28afcc443348ba2d46b5bfd88867fea"
-  version = "v1.0"
+  revision = "35bcf037030dcadcd247618c75c00c6cd17482d7"
+  version = "v1.0.2"
 
 [[projects]]
   name = "github.com/cpuguy83/go-md2man"
@@ -98,6 +98,12 @@
   revision = "2788f0dbd16903de03cb8186e5c7d97b69ad387b"
 
 [[projects]]
+  name = "github.com/mattn/go-runewidth"
+  packages = ["."]
+  revision = "9e777a8366cce605130a531d2cd6363d07ad7317"
+  version = "v0.0.2"
+
+[[projects]]
   branch = "master"
   name = "github.com/ncw/dropbox-sdk-go-unofficial"
   packages = ["dropbox","dropbox/async","dropbox/files","dropbox/properties"]
@@ -114,6 +120,12 @@
   name = "github.com/ncw/swift"
   packages = ["."]
   revision = "8e9b10220613abdbc2896808ee6b43e411a4fa6c"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/nsf/termbox-go"
+  packages = ["."]
+  revision = "4163cd39dda1c0dda883a713640bc01e08951c24"
 
 [[projects]]
   branch = "master"
@@ -196,7 +208,7 @@
 [[projects]]
   branch = "master"
   name = "golang.org/x/net"
-  packages = ["context","context/ctxhttp","http2","http2/hpack","idna","internal/timeseries","lex/httplex","trace"]
+  packages = ["context","context/ctxhttp","html","html/atom","http2","http2/hpack","idna","internal/timeseries","lex/httplex","trace"]
   revision = "c9b681d35165f1995d6f3034e61f8761d4b90c99"
 
 [[projects]]
@@ -250,6 +262,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "e0227ed773a9f6c56d1bfac9de1d87c2a74ce142e418b661b74931d2e2b20945"
+  inputs-digest = "248de1868100335332b37ed2577a3c1559b61c0ab9871da28f800192f9d0ef2b"
   solver-name = "gps-cdcl"
   solver-version = 1

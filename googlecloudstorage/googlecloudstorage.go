@@ -24,6 +24,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ncw/rclone/fs"
@@ -41,7 +42,7 @@ const (
 	timeFormatIn                = time.RFC3339
 	timeFormatOut               = "2006-01-02T15:04:05.000000000Z07:00"
 	metaMtime                   = "mtime" // key to store mtime under in metadata
-	listChunks                  = 256     // chunk size to read directory listings
+	listChunks                  = 1000    // chunk size to read directory listings
 )
 
 var (
@@ -135,6 +136,8 @@ type Fs struct {
 	svc           *storage.Service // the connection to the storage server
 	client        *http.Client     // authorized client
 	bucket        string           // the bucket we are working on
+	bucketOKMu    sync.Mutex       // mutex to protect bucket OK
+	bucketOK      bool             // true if we have created the bucket
 	projectNumber string           // used for finding buckets
 	objectACL     string           // used when creating new objects
 	bucketACL     string           // used when creating new buckets
@@ -305,27 +308,28 @@ type listFn func(remote string, object *storage.Object, isDirectory bool) error
 //
 // dir is the starting directory, "" for root
 //
-// If directories is set it only sends directories
-func (f *Fs) list(dir string, level int, fn listFn) error {
+// Set recurse to read sub directories
+func (f *Fs) list(dir string, recurse bool, fn listFn) error {
 	root := f.root
 	rootLength := len(root)
 	if dir != "" {
 		root += dir + "/"
 	}
 	list := f.svc.Objects.List(f.bucket).Prefix(root).MaxResults(listChunks)
-	switch level {
-	case 1:
+	if !recurse {
 		list = list.Delimiter("/")
-	case fs.MaxLevel:
-	default:
-		return fs.ErrorLevelNotSupported
 	}
 	for {
 		objects, err := list.Do()
 		if err != nil {
+			if gErr, ok := err.(*googleapi.Error); ok {
+				if gErr.Code == http.StatusNotFound {
+					err = fs.ErrorDirNotFound
+				}
+			}
 			return err
 		}
-		if level == 1 {
+		if !recurse {
 			var object storage.Object
 			for _, prefix := range objects.Prefixes {
 				if !strings.HasSuffix(prefix, "/") {
@@ -356,88 +360,120 @@ func (f *Fs) list(dir string, level int, fn listFn) error {
 	return nil
 }
 
-// listFiles lists files and directories to out
-func (f *Fs) listFiles(out fs.ListOpts, dir string) {
-	defer out.Finished()
-	if f.bucket == "" {
-		out.SetError(errors.New("can't list objects at root - choose a bucket using lsd"))
-		return
+// Convert a list item into a BasicInfo
+func (f *Fs) itemToDirEntry(remote string, object *storage.Object, isDirectory bool) (fs.BasicInfo, error) {
+	if isDirectory {
+		d := &fs.Dir{
+			Name:  remote,
+			Bytes: int64(object.Size),
+			Count: 0,
+		}
+		return d, nil
 	}
+	o, err := f.newObjectWithInfo(remote, object)
+	if err != nil {
+		return nil, err
+	}
+	return o, nil
+}
+
+// listDir lists a single directory
+func (f *Fs) listDir(dir string) (entries fs.DirEntries, err error) {
 	// List the objects
-	err := f.list(dir, out.Level(), func(remote string, object *storage.Object, isDirectory bool) error {
-		if isDirectory {
-			dir := &fs.Dir{
-				Name:  remote,
-				Bytes: int64(object.Size),
-				Count: 0,
-			}
-			if out.AddDir(dir) {
-				return fs.ErrorListAborted
-			}
-		} else {
-			o, err := f.newObjectWithInfo(remote, object)
-			if err != nil {
-				return err
-			}
-			if out.Add(o) {
-				return fs.ErrorListAborted
-			}
+	err = f.list(dir, false, func(remote string, object *storage.Object, isDirectory bool) error {
+		entry, err := f.itemToDirEntry(remote, object, isDirectory)
+		if err != nil {
+			return err
+		}
+		if entry != nil {
+			entries = append(entries, entry)
 		}
 		return nil
 	})
 	if err != nil {
-		if gErr, ok := err.(*googleapi.Error); ok {
-			if gErr.Code == http.StatusNotFound {
-				err = fs.ErrorDirNotFound
-			}
-		}
-		out.SetError(err)
+		return nil, err
 	}
+	return entries, err
 }
 
-// listBuckets lists the buckets to out
-func (f *Fs) listBuckets(out fs.ListOpts, dir string) {
-	defer out.Finished()
+// listBuckets lists the buckets
+func (f *Fs) listBuckets(dir string) (entries fs.DirEntries, err error) {
 	if dir != "" {
-		out.SetError(fs.ErrorListOnlyRoot)
-		return
+		return nil, fs.ErrorListBucketRequired
 	}
 	if f.projectNumber == "" {
-		out.SetError(errors.New("can't list buckets without project number"))
-		return
+		return nil, errors.New("can't list buckets without project number")
 	}
 	listBuckets := f.svc.Buckets.List(f.projectNumber).MaxResults(listChunks)
 	for {
 		buckets, err := listBuckets.Do()
 		if err != nil {
-			out.SetError(err)
-			return
+			return nil, err
 		}
 		for _, bucket := range buckets.Items {
-			dir := &fs.Dir{
+			d := &fs.Dir{
 				Name:  bucket.Name,
 				Bytes: 0,
 				Count: 0,
 			}
-			if out.AddDir(dir) {
-				return
-			}
+			entries = append(entries, d)
 		}
 		if buckets.NextPageToken == "" {
 			break
 		}
 		listBuckets.PageToken(buckets.NextPageToken)
 	}
+	return entries, nil
 }
 
-// List lists the path to out
-func (f *Fs) List(out fs.ListOpts, dir string) {
+// List the objects and directories in dir into entries.  The
+// entries can be returned in any order but should be for a
+// complete directory.
+//
+// dir should be "" to list the root, and should not have
+// trailing slashes.
+//
+// This should return ErrDirNotFound if the directory isn't
+// found.
+func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 	if f.bucket == "" {
-		f.listBuckets(out, dir)
-	} else {
-		f.listFiles(out, dir)
+		return f.listBuckets(dir)
 	}
-	return
+	return f.listDir(dir)
+}
+
+// ListR lists the objects and directories of the Fs starting
+// from dir recursively into out.
+//
+// dir should be "" to start from the root, and should not
+// have trailing slashes.
+//
+// This should return ErrDirNotFound if the directory isn't
+// found.
+//
+// It should call callback for each tranche of entries read.
+// These need not be returned in any particular order.  If
+// callback returns an error then the listing will stop
+// immediately.
+//
+// Don't implement this unless you have a more efficient way
+// of listing recursively that doing a directory traversal.
+func (f *Fs) ListR(dir string, callback fs.ListRCallback) (err error) {
+	if f.bucket == "" {
+		return fs.ErrorListBucketRequired
+	}
+	list := fs.NewListRHelper(callback)
+	err = f.list(dir, true, func(remote string, object *storage.Object, isDirectory bool) error {
+		entry, err := f.itemToDirEntry(remote, object, isDirectory)
+		if err != nil {
+			return err
+		}
+		return list.Add(entry)
+	})
+	if err != nil {
+		return err
+	}
+	return list.Flush()
 }
 
 // Put the object into the bucket
@@ -456,13 +492,15 @@ func (f *Fs) Put(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.
 
 // Mkdir creates the bucket if it doesn't exist
 func (f *Fs) Mkdir(dir string) error {
-	// Can't create subdirs
-	if dir != "" {
+	f.bucketOKMu.Lock()
+	defer f.bucketOKMu.Unlock()
+	if f.bucketOK {
 		return nil
 	}
 	_, err := f.svc.Buckets.Get(f.bucket).Do()
 	if err == nil {
 		// Bucket already exists
+		f.bucketOK = true
 		return nil
 	}
 
@@ -474,6 +512,9 @@ func (f *Fs) Mkdir(dir string) error {
 		Name: f.bucket,
 	}
 	_, err = f.svc.Buckets.Insert(f.projectNumber, &bucket).PredefinedAcl(f.bucketACL).Do()
+	if err == nil {
+		f.bucketOK = true
+	}
 	return err
 }
 
@@ -482,10 +523,16 @@ func (f *Fs) Mkdir(dir string) error {
 // Returns an error if it isn't empty: Error 409: The bucket you tried
 // to delete was not empty.
 func (f *Fs) Rmdir(dir string) error {
+	f.bucketOKMu.Lock()
+	defer f.bucketOKMu.Unlock()
 	if f.root != "" || dir != "" {
 		return nil
 	}
-	return f.svc.Buckets.Delete(f.bucket).Do()
+	err := f.svc.Buckets.Delete(f.bucket).Do()
+	if err == nil {
+		f.bucketOK = false
+	}
+	return err
 }
 
 // Precision returns the precision
@@ -684,6 +731,10 @@ func (o *Object) Open(options ...fs.OpenOption) (in io.ReadCloser, err error) {
 //
 // The new object may have been created if an error is returned
 func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
+	err := o.fs.Mkdir("")
+	if err != nil {
+		return err
+	}
 	size := src.Size()
 	modTime := src.ModTime()
 
@@ -718,6 +769,7 @@ func (o *Object) MimeType() string {
 var (
 	_ fs.Fs        = &Fs{}
 	_ fs.Copier    = &Fs{}
+	_ fs.ListRer   = &Fs{}
 	_ fs.Object    = &Object{}
 	_ fs.MimeTyper = &Object{}
 )

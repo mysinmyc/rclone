@@ -20,22 +20,84 @@ import (
 	"github.com/ncw/rclone/fstest"
 )
 
+type remoteConfig struct {
+	Name     string
+	SubDir   bool
+	FastList bool
+}
+
 var (
-	remotes = []string{
-		"TestAmazonCloudDrive:",
-		"TestB2:",
-		"TestCryptDrive:",
-		"TestCryptSwift:",
-		"TestDrive:",
-		"TestDropbox:",
-		"TestGoogleCloudStorage:",
-		"TestHubic:",
-		"TestOneDrive:",
-		"TestS3:",
-		"TestSftp:",
-		"TestSwift:",
-		"TestYandex:",
-		"TestFTP:",
+	remotes = []remoteConfig{
+		{
+			Name:     "TestAmazonCloudDrive:",
+			SubDir:   false,
+			FastList: false,
+		},
+		{
+			Name:     "TestB2:",
+			SubDir:   true,
+			FastList: true,
+		},
+		{
+			Name:     "TestCryptDrive:",
+			SubDir:   false,
+			FastList: false,
+		},
+		{
+			Name:     "TestCryptSwift:",
+			SubDir:   false,
+			FastList: false,
+		},
+		{
+			Name:     "TestDrive:",
+			SubDir:   false,
+			FastList: false,
+		},
+		{
+			Name:     "TestDropbox:",
+			SubDir:   false,
+			FastList: false,
+		},
+		{
+			Name:     "TestGoogleCloudStorage:",
+			SubDir:   true,
+			FastList: true,
+		},
+		{
+			Name:     "TestHubic:",
+			SubDir:   false,
+			FastList: false,
+		},
+		{
+			Name:     "TestOneDrive:",
+			SubDir:   false,
+			FastList: false,
+		},
+		{
+			Name:     "TestS3:",
+			SubDir:   true,
+			FastList: true,
+		},
+		{
+			Name:     "TestSftp:",
+			SubDir:   false,
+			FastList: false,
+		},
+		{
+			Name:     "TestSwift:",
+			SubDir:   true,
+			FastList: true,
+		},
+		{
+			Name:     "TestYandex:",
+			SubDir:   false,
+			FastList: false,
+		},
+		{
+			Name:     "TestFTP:",
+			SubDir:   false,
+			FastList: false,
+		},
 	}
 	binary = "fs.test"
 	// Flags
@@ -60,7 +122,7 @@ type test struct {
 }
 
 // newTest creates a new test
-func newTest(remote string, subdir bool) *test {
+func newTest(remote string, subdir bool, fastlist bool) *test {
 	t := &test{
 		remote:  remote,
 		subdir:  subdir,
@@ -69,6 +131,7 @@ func newTest(remote string, subdir bool) *test {
 	}
 	if *verbose {
 		t.cmdLine = append(t.cmdLine, "-test.v")
+		fs.Config.LogLevel = fs.LogLevelDebug
 	}
 	if *runOnly != "" {
 		t.cmdLine = append(t.cmdLine, "-test.run", *runOnly)
@@ -76,7 +139,10 @@ func newTest(remote string, subdir bool) *test {
 	if subdir {
 		t.cmdLine = append(t.cmdLine, "-subdir")
 	}
-	t.cmdString = strings.Join(t.cmdLine, " ")
+	if fastlist {
+		t.cmdLine = append(t.cmdLine, "-fast-list")
+	}
+	t.cmdString = toShell(t.cmdLine)
 	return t
 }
 
@@ -112,13 +178,37 @@ func (t *test) findFailures() {
 	}
 }
 
-// trial runs a single test
-func (t *test) trial() {
+// nextCmdLine returns the next command line
+func (t *test) nextCmdLine() []string {
 	cmdLine := t.cmdLine[:]
 	if t.runFlag != "" {
 		cmdLine = append(cmdLine, "-test.run", t.runFlag)
 	}
-	cmdString := strings.Join(cmdLine, " ")
+	return cmdLine
+}
+
+// if matches then is definitely OK in the shell
+var shellOK = regexp.MustCompile("^[A-Za-z0-9./_:-]+$")
+
+// converts a argv style input into a shell command
+func toShell(args []string) (result string) {
+	for _, arg := range args {
+		if result != "" {
+			result += " "
+		}
+		if shellOK.MatchString(arg) {
+			result += arg
+		} else {
+			result += "'" + arg + "'"
+		}
+	}
+	return result
+}
+
+// trial runs a single test
+func (t *test) trial() {
+	cmdLine := t.nextCmdLine()
+	cmdString := toShell(cmdLine)
 	log.Printf("%q - Starting (try %d/%d)", cmdString, t.try, *maxTries)
 	cmd := exec.Command(cmdLine[0], cmdLine[1:]...)
 	start := time.Now()
@@ -138,21 +228,21 @@ func (t *test) cleanFs() error {
 	if err != nil {
 		return err
 	}
-	dirs, err := fs.NewLister().SetLevel(1).Start(f, "").GetDirs()
-	for _, dir := range dirs {
+	entries, err := fs.ListDirSorted(f, true, "")
+	if err != nil {
+		return err
+	}
+	return entries.ForDirError(func(dir *fs.Dir) error {
 		if fstest.MatchTestRemote.MatchString(dir.Name) {
 			log.Printf("Purging %s%s", t.remote, dir.Name)
 			dir, err := fs.NewFs(t.remote + dir.Name)
 			if err != nil {
 				return err
 			}
-			err = fs.Purge(dir)
-			if err != nil {
-				return err
-			}
+			return fs.Purge(dir)
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // clean runs a single clean on a fs for left over directories
@@ -222,9 +312,25 @@ func removeTestBinary() {
 func main() {
 	flag.Parse()
 	if *runTests != "" {
-		remotes = strings.Split(*runTests, ",")
+		newRemotes := []remoteConfig{}
+		for _, name := range strings.Split(*runTests, ",") {
+			for i := range remotes {
+				if remotes[i].Name == name {
+					newRemotes = append(newRemotes, remotes[i])
+					goto found
+				}
+			}
+			log.Printf("Remote %q not found - inserting with default flags", name)
+			newRemotes = append(newRemotes, remoteConfig{Name: name})
+		found:
+		}
+		remotes = newRemotes
 	}
-	log.Printf("Testing remotes: %s", strings.Join(remotes, ", "))
+	var names []string
+	for _, remote := range remotes {
+		names = append(names, remote.Name)
+	}
+	log.Printf("Testing remotes: %s", strings.Join(names, ", "))
 
 	start := time.Now()
 	if *clean {
@@ -238,9 +344,14 @@ func main() {
 	results := make(chan *test, 8)
 	awaiting := 0
 	for _, remote := range remotes {
-		awaiting += 2
-		go newTest(remote, false).run(results)
-		go newTest(remote, true).run(results)
+		for _, subdir := range []bool{false, true} {
+			for _, fastlist := range []bool{false, true} {
+				if (!subdir || subdir && remote.SubDir) && (!fastlist || fastlist && remote.FastList) {
+					go newTest(remote.Name, subdir, fastlist).run(results)
+					awaiting++
+				}
+			}
+		}
 	}
 
 	// Wait for the tests to finish
@@ -259,7 +370,8 @@ func main() {
 	} else {
 		log.Printf("FAIL: %d tests failed in %v", len(failed), duration)
 		for _, t := range failed {
-			log.Printf("  * %s", t.cmdString)
+			log.Printf("  * %s", toShell(t.nextCmdLine()))
+			log.Printf("    * Failed tests: %v", t.failedTests)
 		}
 		os.Exit(1)
 	}

@@ -44,6 +44,12 @@ const (
 	// ConfigClientSecret is the config key used to store the client secret
 	ConfigClientSecret = "client_secret"
 
+	// ConfigAuthURL is the config key used to store the auth server endpoint
+	ConfigAuthURL = "auth_url"
+
+	// ConfigTokenURL is the config key used to store the token server endpoint
+	ConfigTokenURL = "token_url"
+
 	// ConfigAutomatic indicates that we want non-interactive configuration
 	ConfigAutomatic = "config_automatic"
 )
@@ -90,6 +96,7 @@ var (
 	noUpdateModTime = BoolP("no-update-modtime", "", false, "Don't update destination mod-time if files identical.")
 	backupDir       = StringP("backup-dir", "", "", "Make backups into hierarchy based in DIR.")
 	suffix          = StringP("suffix", "", "", "Suffix for use with --backup-dir.")
+	useListR        = BoolP("fast-list", "", false, "Use recursive list if available. Uses more memory but fewer transactions.")
 	bwLimit         BwTimetable
 	bufferSize      SizeSuffix = 16 << 20
 
@@ -215,6 +222,7 @@ type ConfigInfo struct {
 	DataRateUnit       string
 	BackupDir          string
 	Suffix             string
+	UseListR           bool
 	BufferSize         SizeSuffix
 }
 
@@ -361,6 +369,7 @@ func LoadConfig() {
 	Config.NoUpdateModTime = *noUpdateModTime
 	Config.BackupDir = *backupDir
 	Config.Suffix = *suffix
+	Config.UseListR = *useListR
 	Config.BufferSize = bufferSize
 
 	ConfigPath = *configFile
@@ -466,7 +475,6 @@ func loadConfigFile() (*goconfig.ConfigFile, error) {
 			err := setConfigPassword(envpw)
 			if err != nil {
 				fmt.Println("Using RCLONE_CONFIG_PASS returned:", err)
-				envpw = ""
 			} else {
 				Debugf(nil, "Using RCLONE_CONFIG_PASS password.")
 			}
@@ -1052,7 +1060,8 @@ func EditConfig() {
 			fmt.Printf("\n")
 		} else {
 			fmt.Printf("No remotes found - make a new one\n")
-			what = append(what[1:2], what[3:]...)
+			// take 2nd item and last 2 items of menu list
+			what = append(what[1:2], what[len(what)-2:]...)
 		}
 		switch i := Command(what); i {
 		case 'e':
